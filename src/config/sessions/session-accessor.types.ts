@@ -78,6 +78,8 @@ export type SessionEntryReadOnlyWorkerScope = SessionEntryReadScope & {
 export type SessionEntryListScope = Partial<Omit<SessionEntryReadScope, "sessionKey">> & {
   /** Select exact persisted keys after validating the complete listing snapshot. */
   sessionKeys?: readonly string[];
+  /** Retain full cron-run entries for deletion guards, and only metadata for ordinary sessions. */
+  cronRetention?: true;
   /** Validate the complete listing, retaining full expired cron rows only for this logical owner. */
   expiredCronRuns?: { agentId: string; updatedBefore: number };
 };
@@ -193,6 +195,8 @@ export type SessionTranscriptWriteScope = Omit<SessionTranscriptAccessScope, "se
   expectedWriterRunId?: string;
   /** Optional lifecycle fence paired with sessionId for run-owned writes. */
   expectedLifecycleRevision?: string;
+  /** Exact owner facts, including absent fields, checked inside the write transaction. */
+  expectedOwner?: Pick<SessionEntry, "lifecycleRevision" | "activeWriterRunId">;
 };
 
 export type SessionEntrySummary = {
@@ -371,6 +375,14 @@ export type SessionTranscriptWriteTransactionContext = SessionTranscriptRuntimeT
 export type SessionTranscriptTurnUpdateMode = "inline" | "file-only" | "none";
 
 export type SessionTranscriptTurnMessageAppend = TranscriptMessageAppendOptions<unknown> & {
+  /** Audited preparation runs once on the host against worker-read idempotency facts. */
+  workerPreparation?: Pick<
+    TranscriptMessageAppendOptions<unknown>,
+    "prepareMessageAfterIdempotencyCheck" | "beforeFreshMessageCommit"
+  >;
+  predicate?:
+    | { kind: "latest-assistant-differs"; runId: string; text: string }
+    | { kind: "active-entry"; entryId: string; errorMessage: string };
   /**
    * Runs inside the session writer queue before the SQLite transaction begins.
    * The commit phase revalidates session ownership and database idempotency
@@ -388,6 +400,9 @@ export type SessionTranscriptTurnMessageAppend = TranscriptMessageAppendOptions<
 export type SessionTranscriptTurnWriteContext = Partial<SessionTranscriptRuntimeTarget>;
 
 export type SessionTranscriptTurnPersistOptions = {
+  /** Retained caller authority, with no same-database reads inside worker grants. */
+  assertCurrent?: () => void;
+  acceptedResultGuard?: { expectedWriterRunId: string | null; errorMessage: string };
   /** Runtime config used for lock settings, redaction, and header metadata. */
   config?: OpenClawConfig;
   /** Working directory recorded in a newly created transcript header. */
@@ -437,6 +452,7 @@ export type SessionTranscriptTurnPersistOptions = {
 };
 
 export interface SessionTranscriptTurnPersistResult {
+  predicateSkipped?: boolean;
   sessionTurnMutationResult?: SessionTranscriptTurnMutationResult;
   appendedCount: number;
   messages: TranscriptMessageAppendResult<unknown>[];
